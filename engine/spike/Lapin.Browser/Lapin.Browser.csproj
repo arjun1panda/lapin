@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+  <!-- Spike, stage 0 of docs/plan-browser-engine.md: the engine in the browser (see engine/spike/README.md). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Stage 0, step 1 only: the engine serializes by reflection (step 2 replaces it with generated contexts). -->
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+  </PropertyGroup>
+  <!-- manifold, linked into the engine's WebAssembly (build-manifold-wasm.sh): the desktop's ManifoldBooleans runs as it is. -->
+  <PropertyGroup Condition="Exists('../native/browser-wasm/manifoldc.a')">
+    <WasmBuildNative>true</WasmBuildNative>
+  </PropertyGroup>
+  <ItemGroup Condition="Exists('../native/browser-wasm/manifoldc.a')">
+    <NativeFileReference Include="../native/browser-wasm/manifoldc.a" />
+    <NativeFileReference Include="../native/browser-wasm/libmanifold.a" />
+    <NativeFileReference Include="../native/browser-wasm/libClipper2.a" />
+  </ItemGroup>
+  <Import Project="../Refs.props" />
+</Project>

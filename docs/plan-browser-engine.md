@@ -78,3 +78,48 @@ Stage 0: 2–3 days. Stage 1: 2–3 days (mostly tests). Stage 2: 5–7 days. St
 3. **Safari and Firefox**: is "save by download" acceptable for testers, or do we wait for them to get the File System Access API? (Default: acceptable, stated on the start screen.)
 4. **Interpreter fallback**: keep a non-AOT build for debugging only, or none? (Default: debugging only, never deployed.)
 5. **The plugins**: the web build excludes the Bubbles tab as every public build does; confirm nothing else is private in the `lapin` product. (Default: nothing else.)
+
+## Spike results (25.10.2026, branch `spike/browser-engine`, `engine/spike/`)
+
+The spike lives outside `Lapin.slnx` (the desktop build and CI never see it): `engine/spike/shared/Probe.cs` is the measurement, run natively by `Lapin.Browser.Check` (the reference, with manifold) and in the browser by `Lapin.Browser` (`Microsoft.NET.Sdk.WebAssembly`, the modules by plain project references). Two loads: `testLapin.lapin` (the old test room, converted once to format 3 by the native engine) and a generated storey (24 × 20 m in 4 m rooms: 13 walls crossing and joining, 25 doors and windows, a slab, a hip roof; 176 entities, 80 bodies), built by commands as the interface would, then the whole storey rebuilt.
+
+### Step 1: the engine compiles and runs for `browser-wasm` — passed
+
+- Builds with the stock SDK, no workload, no change to any engine project. `NativeLibrary.TryLoad("manifoldc")` answers "missing" without failing; `Apache.Arrow` and `System.IO.Compression` work; the package opens from its bytes through Emscripten's in-memory file system.
+- Only obstacle: the WebAssembly SDK turns reflection-based `System.Text.Json` off by default; turned back on for this step (`JsonSerializerIsReflectionEnabledByDefault`).
+- `testLapin.lapin`: same 30 entities and 5 bodies as natively; the slab (14.1288 m³), the column (0.48) and the 200 mm wall are identical to the native volumes; the two layered walls are larger because, without manifold, the column does not cut them (the diagnostic says so). Runtime start 0.15 s (local), open 0.4 s.
+- Interpreted speed on the generated storey: snapshot 1925 ms against 97 ms natively, rebuild of the storey 2028 ms against 99 ms, the whole build by commands 26.4 s against 3.0 s; that is about 20× slower although the browser does no booleans. **The interpreter is not usable: AOT is required**, as the plan assumed.
+
+### Step 3: manifold in the browser — passed, by linking it in (not from npm)
+
+- **manifold-3d from npm does not work for us.** Called synchronously from inside a .NET → JavaScript call (`[JSImport]`), which is what `ISolidBooleans` needs, it aborts (`RuntimeError: Aborted()`), even on two cubes; the same calls work in Node and in a page without the .NET runtime, and an instance made before the runtime starts fails with "memory access out of bounds". Two Emscripten modules sharing a call stack is not a road to build on; its meshes are single precision besides.
+- **Linked into the engine's WebAssembly, it works.** `engine/spike/build-manifold-wasm.sh` builds manifold v3.2.1 (the tag and options of `scripts/build-manifold.mjs`: manifold, Clipper2, no TBB) with the Emscripten 3.1.56 that the `wasm-tools` workload brings, with the runtime's exception model (`-fwasm-exceptions`) and SIMD; `Lapin.Browser` takes the three static libraries as `NativeFileReference`s (`WasmBuildNative`). The library must be named `manifoldc.a`, not `libmanifoldc.a`: the generated P/Invoke table names a static library by its file name, and `ManifoldBooleans` imports `manifoldc`. Then **the desktop's own `ManifoldBooleans` runs unchanged, in double precision** (`NativeLibrary.TryLoad` cannot see a linked library, so the browser host registers the service itself).
+- Result: two cubes give 7, 15 and 1 m³ as natively; `testLapin.lapin` gives 18.92712353 m³ and the generated storey 362.588057 m³, **identical to the native engine to the last decimal**.
+- Cost: the runtime's native module grows to about 3.1 MB (before compression).
+
+### Step 2: AOT and trimming — AOT holds; the speed is just over budget; full trimming needs the JSON contexts
+
+- **AOT** (`RunAOTCompilation`, the `wasm-tools` workload; the system SDK needs root for it, so the spike used a user-level SDK in `~/.dotnet-wasm`): publishes in about 2 minutes and runs everything without an exception; volumes identical to the native ones.
+- **Speed**, generated storey, against the native engine on the same machine (Apple M-series, headless Chrome):
+
+  | | Interpreted | AOT | Native |
+  |---|---|---|---|
+  | All bodies (snapshot) | 2705 ms | 311–341 ms | 92–97 ms |
+  | Storey rebuilt | 2795 ms | 327–344 ms | 97–99 ms |
+  | Built by 60 commands | 50 s | 6.1–6.3 s | 3.0 s |
+  | Small edit (`testLapin`, 5 bodies) | 28 ms | 10–16 ms | 4–5 ms |
+
+  AOT is 8× faster than the interpreter and about **3.4× slower than native** on whole-storey work (2× on command-by-command editing): over the 3× budget, though a third of a second for rebuilding 80 bodies stays interactive. `-O3` for the native part instead of the defaults gains about 5%, no more.
+- **Size**, compressed (brotli), everything the page downloads: **6.3 MB** with AOT and the framework trimmed (`TrimMode=partial`, our assemblies whole); 2.7 MB interpreted and fully trimmed. Inside the 15 MB budget either way.
+- **Memory**: the WebAssembly heap is 115 MB after the generated storey.
+- **Start**: 0.14–0.18 s to a running engine from a local server (the download comes on top, over the network).
+- **Full trimming** (`TrimMode=full`) breaks at run time where the engine serializes records by reflection (constructor parameter names are trimmed away): 55 places reported by the trimmer, nearly all `JsonSerializer.SerializeToNode/Deserialize` of records (`JoinerySpec`, `LintelRule`, `StairSpec`, `LintelProduct`, `MaterialLayer`, the standards, the package manifest…), generic `JsonArray.Add<T>`/`JsonValue.Create<T>`, and `ModuleLoader` (which the browser does not use). The cure is mechanical and helps the desktop too: one source-generated `JsonSerializerContext` for those records, and `JsonNode` overloads instead of the generic ones. Until then the browser build keeps reflection on and trims only the framework, which the 6.3 MB already reflects.
+
+### What the spike says
+
+All three questions are answered. The engine runs in the browser unchanged, with its own booleans in double precision and results identical to the desktop's, in 6.3 MB and 115 MB of memory. The one number past its budget is speed: 3.4× native on whole-storey work. Stage 1 can start as planned, with two changes:
+
+1. **manifold is linked in, not taken from npm** (stage 1's "manifold behind the service" stays; the browser host registers the desktop's `ManifoldBooleans`). `scripts/build-manifold.mjs` gains a `browser-wasm` branch that writes `manifoldc.a` (no `lib` prefix).
+2. **The JSON contexts move into stage 1** (they were implied by "trimming"): with them the browser build trims fully and shrinks, and the desktop serializes without reflection.
+
+The speed budget is for the user to settle: keep 3× and look for the rest in stage 3 (profiling the rebuild in the browser; the snapshot builds meshes the worker could build lazily), or accept 4× for testers.
